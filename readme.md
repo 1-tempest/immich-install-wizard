@@ -15,7 +15,7 @@ This repository contains a script to install and configure Immich, a media serve
 
 2. Download and run the installation script:
     ```
-    curl -O https://raw.githubusercontent.com/1-tempest/immichInstallWizard/main/immichWizard/install.sh && sudo ./install.sh
+    curl -O https://raw.githubusercontent.com/1-tempest/immich-install-wizard/main/install.sh && sudo ./install.sh
     ```
 
 ## Script Overview

@@ -249,9 +249,10 @@ get_local_permissions() {
 hardcode_local_assets() {
   # mkdir -p library/thumbs library/encoded-video
   
-  sed -i "/- $${UPLOAD_LOCATION}:/a \
-      - ./library/thumbs:/usr/src/app/upload/thumbs${added_by_wizard}\
-      - ./library/encoded-video:/usr/src/app/upload/encoded-video${added_by_wizard}" docker-compose.yml
+  sed -i "/- \${UPLOAD_LOCATION}:/a \\
+      - ./library/thumbs:/usr/src/app/upload/thumbs\${added_by_wizard} \\
+      - ./library/encoded-video:/usr/src/app/upload/encoded-video\${added_by_wizard}" docker-compose.yml
+
 }
 
 get_network_permissions() {

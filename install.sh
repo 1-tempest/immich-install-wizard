@@ -179,6 +179,10 @@ detect_path_add_volume() {
   local volume_handler=$2
   if [[ $dir_path =~ ^// || $dir_path =~ ^\\\\ ]]; then
     # echo "  Detected network mount: $dir_path"
+    if hw_is_wsl; then
+      echo "    Network paths are not supported on WSL." >&2
+      return 1
+    fi
     get_network_permissions "$dir_path" "$volume_handler"
     local exit_code=$?  # Capture the exit code
 

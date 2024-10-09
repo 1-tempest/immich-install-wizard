@@ -5,7 +5,9 @@ set -o pipefail
 local_mount_paths=()
 network_volumes=""
 added_by_wizard="# Added by wizard"
+modified_by_wizard="# Modified by wizard"
 
+#region Mostly Original Code from default immich install.sh on 2024.10.09
 create_immich_directory() {
   local -r Tgt='./immich-app'
   echo "Creating Immich directory..."
@@ -36,35 +38,6 @@ generate_random_password() {
     sed -i -e "s/DB_PASSWORD=postgres/DB_PASSWORD=${rand_pass}/" ./.env
   fi
 }
-
-prompt_for_upload_location() {
-  while true; do
-    upload_location=$(prompt "Enter the original media storage location." "" "./library")
-
-    if [[ -n $upload_location && $upload_location != "./library" ]]; then
-      # Call the detect_path_add_volume function
-      if detect_path_add_volume "$upload_location" "update_upload_location"; then
-        hardcode_local_assets
-        break  # Exit the loop if the function returns true
-      fi
-    elif [[ -z $upload_location ]]; then
-      echo "  Upload location cannot be empty. Please try again." >&2
-    else
-      break  # Exit the loop if the user enters the default value
-    fi
-  done
-  return 0
-}
-
-update_upload_location() {
-  local mount_path=$1
-  local app_upload_path="/usr/src/app/upload"
-
-  # Replace the local path in .env file
-  sed -i -e "s|UPLOAD_LOCATION=./library|UPLOAD_LOCATION=${mount_path}|" ./.env
-  return 0
-}
-
 
 start_docker_compose() {
   echo "Starting Immich's docker containers"
@@ -98,13 +71,82 @@ If you want to configure custom information of the server, including the databas
 EOF
 }
 
+prompt_start_docker_compose() {
+  local start_containers=$(prompt "Would you like to start the docker containers now?" "y n" "y")
+  if [[ $start_containers == "y" ]]; then
+    start_docker_compose
+  fi
+}
+#endregion
+
+#region Upload Location
+prompt_for_upload_location() {
+  while true; do
+    local default_upload_location="./library"
+    upload_location=$(prompt "Enter the original media storage location." "" "$default_upload_location")
+
+    if [[ -n $upload_location && $upload_location != "$default_upload_location" ]]; then
+      # Call the detect_path_add_volume function
+      if detect_path_add_volume "$upload_location" "update_upload_location"; then
+        hardcode_local_assets
+        break  # Exit the loop if the function returns true
+      fi
+    elif [[ -z $upload_location ]]; then
+      echo "  Upload location cannot be empty. Please try again." >&2
+    else
+      break  # Exit the loop if the user enters the default value
+    fi
+  done
+  return 0
+}
+
+update_upload_location() {
+  local mount_path=$1
+  local app_upload_path="/usr/src/app/upload"
+
+  # Replace the local path in .env file
+  # sed -i -e "s|UPLOAD_LOCATION=./library|UPLOAD_LOCATION=${mount_path} ${modified_by_wizard}|" ./.env
+  update_env_variable "UPLOAD_LOCATION" "${mount_path}" "UPLOAD_LOCATION"
+  return 0
+}
+
+update_env_variable(){
+  local key="$1"
+  local value="$2"
+  local append_below_key="$3"
+
+  if grep -q "^$key=" ./.env; then
+    # If key exists, update it
+    sed -i -e "s|^$key=.*|$key=${value} ${modified_by_wizard}|" ./.env
+  else
+    # If key does not exist, append it below append_below_key
+    sed -i "/^$append_below_key=/a $key=${value} ${added_by_wizard}" ./.env
+  fi
+}
+
+hardcode_local_assets() {
+  # mkdir -p library/thumbs library/encoded-video
+
+  update_env_variable "THUMBS_LOCATION" "./library/thumbs" "UPLOAD_LOCATION"
+  update_env_variable "ENCODED_VIDEO_LOCATION" "./library/encoded-video" "UPLOAD_LOCATION"
+  
+  docker_compose_add_external_volume "\${THUMBS_LOCATION}:/usr/src/app/upload/thumbs"
+  docker_compose_add_external_volume "\${ENCODED_VIDEO_LOCATION}:/usr/src/app/upload/encoded-video"
+
+  #sed -i "/- \${UPLOAD_LOCATION}:/a \\
+  #    - \${THUMBS_LOCATION}:/usr/src/app/upload/thumbs ${added_by_wizard} \\
+  #    - \${ENCODED_VIDEO_LOCATION}:/usr/src/app/upload/encoded-video ${added_by_wizard}" docker-compose.yml
+
+}
+#endregion
+
+#region Shared Functions
 add_network_volumes(){  
   escaped_network_volumes=$(echo "$network_volumes" | sed ':a;N;$!ba;s/[\/&]/\\&/g; s/\n/\\n/g')
   sed -i "/^volumes:/a \\
   $escaped_network_volumes" docker-compose.yml
   return 0
 }
-
 
 prompt() {
   # Example 1: Prompt for starting docker with y/n options and default value of 'n'
@@ -155,23 +197,6 @@ prompt() {
 
   # Return the user's response
   echo "$user_input"
-}
-
-prompt_for_external_library() {
-  local_mount_paths=()
-  echo ""
-  echo "External Libraries - https://immich.app/docs/guides/external-library/"
-  local add_external_libraries=$(prompt "Would you like to use one or more external libraries?" "y n" "n")
-  if [[ $add_external_libraries == "y" ]]; then
-    while true; do
-      local dir_path=$(prompt "Enter the directory path. Network and local paths are supported (s to stop):")
-      if [[ $dir_path == "s" ]]; then
-        break
-      fi
-      # Detecting network paths correctly
-      detect_path_add_volume "$dir_path" docker_compose_add_external_volume
-    done
-  fi
 }
 
 detect_path_add_volume() {
@@ -250,15 +275,6 @@ get_local_permissions() {
   return $($volume_handler "$mount_path")
 }
 
-hardcode_local_assets() {
-  # mkdir -p library/thumbs library/encoded-video
-  
-  sed -i "/- \${UPLOAD_LOCATION}:/a \\
-      - ./library/thumbs:/usr/src/app/upload/thumbs\${added_by_wizard} \\
-      - ./library/encoded-video:/usr/src/app/upload/encoded-video\${added_by_wizard}" docker-compose.yml
-
-}
-
 get_network_permissions() {
   local dir_path=$1
   local volume_handler=$2
@@ -322,8 +338,38 @@ prompt_readonly() {
 docker_compose_add_external_volume() {
   local volume=$1
   # echo "  Updating docker-compose.yml with the new volume..."
-  sed -i "/\/etc\/localtime:\/etc\/localtime:ro/a\      # Added by wizard\n      - ${volume}" docker-compose.yml
+  sed -i "/\/etc\/localtime:\/etc\/localtime:ro/a\      \n      - ${volume} ${added_by_wizard}" docker-compose.yml
   return 0
+}
+
+download_file() {
+  local file="$1"
+  echo "  Downloading $file..."
+  # Execute curl and store the result
+  if "${Curl[@]}" "$RepoUrl/$file" -o "./$file"; then
+    return 0  # Success (true)
+  else
+    return 1  # Failure (false)
+  fi
+}
+#endregion
+
+#region External Libraries
+prompt_for_external_library() {
+  local_mount_paths=()
+  echo ""
+  echo "External Libraries - https://immich.app/docs/guides/external-library/"
+  local add_external_libraries=$(prompt "Would you like to use one or more external libraries?" "y n" "n")
+  if [[ $add_external_libraries == "y" ]]; then
+    while true; do
+      local dir_path=$(prompt "Enter the directory path. Network and local paths are supported (s to stop):")
+      if [[ $dir_path == "s" ]]; then
+        break
+      fi
+      # Detecting network paths correctly
+      detect_path_add_volume "$dir_path" docker_compose_add_external_volume
+    done
+  fi
 }
 
 show_mount_paths() {
@@ -332,15 +378,9 @@ show_mount_paths() {
     echo "  $path"
   done
 }
+#endregion
 
-prompt_start_docker_compose() {
-  local start_containers=$(prompt "Would you like to start the docker containers now?" "y n" "y")
-  if [[ $start_containers == "y" ]]; then
-    start_docker_compose
-  fi
-}
-
-# --- BACKUPS ---
+#region BACKUPS
 
 prompt_for_backups() {
   echo ""
@@ -398,9 +438,9 @@ docker_compose_change_backup_location() {
     return 0
 }
 
-# --- END OF BACKUPS --- 
+#endregion 
 
-# --- DETECT HW ---
+#region DETECT HW
 hw_is_wsl() {
   # Check if running in WSL by looking for WSL-specific files
   if grep -q "Microsoft" /proc/version || [ -f /proc/sys/kernel/osrelease ] && grep -q "WSL" /proc/sys/kernel/osrelease; then
@@ -538,17 +578,7 @@ hwt_is_vaapi() {
   return 1  # False (VAAPI not available)
 }
 
-download_file() {
-  local file="$1"
-  echo "  Downloading $file..."
-  # Execute curl and store the result
-  if "${Curl[@]}" "$RepoUrl/$file" -o "./$file"; then
-    return 0  # Success (true)
-  else
-    return 1  # Failure (false)
-  fi
-}
-
+#region Merge Extends
 merge_extends() {
   local compose_file="$1"
   local extends_file="$2"
@@ -565,6 +595,7 @@ merge_extends() {
     fi
   fi
 
+  # Extract the content between the service name and the next service name
   extends_content=$(sed -n "/^  $hw_flag:/,/^[[:space:]]\{2\}[^[:space:]]/ { /^[[:space:]]\{2\}[^[:space:]]/!p }" "$extends_file")
   local original_compose_content=$(sed -n "/^  $service_name:/,/^[[:space:]]\{2\}[a-zA-Z0-9_-]\+:/p" "$compose_file" | sed '$d')
   local compose_content=$original_compose_content
@@ -573,7 +604,7 @@ merge_extends() {
   # append the image flag to the image field in the compose file
   compose_content=$(echo "$compose_content" | sed "s|\(image:.*:\${IMMICH_VERSION:-release}\)|\1-$image_flag|")
 
-  # --- Extract only the actual device mappings from extends_content ---
+#region Extract only the actual device mappings from extends_content
 
   # Initialize variables to store device groups and their settings
   declare -a device_groups
@@ -602,9 +633,9 @@ merge_extends() {
     device_groups+=("$current_group")
     device_group_settings+=("$current_settings")
   fi
-  # --- End of Extract only the actual device mappings from extends_content ---
+#endregion
 
-  # --- Merge Files ---
+#region Merge Files
   for i in "${!device_groups[@]}"; do
     local current_device_group=${device_groups[$i]}
     local current_group_settings=$(echo "${device_group_settings[$i]}" | sed "/^$/! s/\$/ $added_by_wizard/")
@@ -630,9 +661,9 @@ $current_group_settings"
     fi
 
   done
-  # --- End of Merge Files ---
+#endregion
 
-  # --- Update the compose file with the merged content ---
+#region Update the compose file with the merged content
   # Escape special characters in the content, including newlines
   escaped_compose_content=$(echo "$compose_content" | sed ':a;N;$!ba;s/[\/&]/\\&/g; s/\n/\\n/g')
 
@@ -654,10 +685,9 @@ sed -i "/^  $service_name:/,/^[[:space:]]\{2\}[a-zA-Z0-9_-]\+:/ {
     echo "Failed to update '$compose_file'."
   fi
 
-  # --- End of Update the compose file with the merged content ---
+#endregion
 }
-
-
+#endregion
 
 set_hwa() {
   local image_flag=""
@@ -711,8 +741,7 @@ set_hwt() {
   fi
 
 }
-
-# --- END OF DETECT HW ---
+#endregion
 
 # MAIN
 main() {

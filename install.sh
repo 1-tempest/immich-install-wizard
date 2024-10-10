@@ -6,6 +6,9 @@ local_mount_paths=()
 network_volumes=""
 added_by_wizard="# Added by wizard"
 modified_by_wizard="# Modified by wizard"
+# For Importing Users and Media
+users=()
+media_locations=()
 
 #region Mostly Original Code from default immich install.sh on 2024.10.09
 create_immich_directory() {
@@ -29,29 +32,54 @@ download_dot_env_file() {
   "${Curl[@]}" "$RepoUrl"/example.env -o ./.env
 }
 
-generate_random_password() {
+generate_random_db_password(){
   echo "  Generate random password for .env file..."
-  rand_pass=$(echo "$RANDOM$(date)$RANDOM" | sha256sum | base64 | head -c10)
-  if [ -z "$rand_pass" ]; then
-    sed -i -e "s/DB_PASSWORD=postgres/DB_PASSWORD=postgres${RANDOM}${RANDOM}/" ./.env
-  else
-    sed -i -e "s/DB_PASSWORD=postgres/DB_PASSWORD=${rand_pass}/" ./.env
-  fi
+  rand_pass=$(generate_random_password 10)
+  sed -i -e "s/DB_PASSWORD=postgres/DB_PASSWORD=${rand_pass}/" ./.env
 }
 
 start_docker_compose() {
   echo "Starting Immich's docker containers"
+  mkdir -p ./postgres ./library
 
-  if ! docker compose >/dev/null 2>&1; then
-    echo "failed to find 'docker compose'"
-    return 1
+  # Try to start with docker compose first
+  if docker compose >/dev/null 2>&1; then
+    # If `docker compose` is available, use it
+    if ! docker compose up --remove-orphans -d; then
+      echo "Could not start with docker compose. Checking for start_interval issue..."
+
+      # Remove start_interval from the docker-compose.yml
+      sed -i '/start_interval/d' docker-compose.yml
+
+      # Try to start again
+      if ! docker compose up --remove-orphans -d; then
+        echo "Could not start with docker compose after removing start_interval. Check for errors above."
+        return 1
+      fi
+    fi
+  else
+    # Fallback to `docker-compose` if `docker compose` isn't available
+    if docker-compose >/dev/null 2>&1; then
+      if ! docker-compose up --remove-orphans -d; then
+        echo "Could not start with docker-compose. Checking for start_interval issue..."
+
+        # Remove start_interval from the docker-compose.yml
+        sed -i '/start_interval/d' docker-compose.yml
+
+        # Try to start again
+        if ! docker-compose up --remove-orphans -d; then
+          echo "Could not start with docker-compose after removing start_interval. Check for errors above."
+          return 1
+        fi
+      fi
+    else
+      echo "Neither docker compose nor docker-compose is available."
+      return 1
+    fi
   fi
 
-  if ! docker compose up --remove-orphans -d; then
-    echo "Could not start. Check for errors above."
-    return 1
-  fi
-  show_friendly_message
+  
+  #show_friendly_message
 }
 
 show_friendly_message() {
@@ -83,7 +111,7 @@ prompt_start_docker_compose() {
 prompt_for_upload_location() {
   while true; do
     local default_upload_location="./library"
-    upload_location=$(prompt "Enter the original media storage location." "" "$default_upload_location")
+    upload_location=$(prompt "Enter the storage location for assets uploaded through the web-browser or phone client." "" "$default_upload_location")
 
     if [[ -n $upload_location && $upload_location != "$default_upload_location" ]]; then
       # Call the detect_path_add_volume function
@@ -130,8 +158,8 @@ hardcode_local_assets() {
   update_env_variable "THUMBS_LOCATION" "./library/thumbs" "UPLOAD_LOCATION"
   update_env_variable "ENCODED_VIDEO_LOCATION" "./library/encoded-video" "UPLOAD_LOCATION"
   
-  docker_compose_add_external_volume "\${THUMBS_LOCATION}:/usr/src/app/upload/thumbs"
-  docker_compose_add_external_volume "\${ENCODED_VIDEO_LOCATION}:/usr/src/app/upload/encoded-video"
+  docker_compose_add_external_volume "\${THUMBS_LOCATION}" "/usr/src/app/upload/thumbs"
+  docker_compose_add_external_volume "\${ENCODED_VIDEO_LOCATION}" "/usr/src/app/upload/encoded-video"
 
   #sed -i "/- \${UPLOAD_LOCATION}:/a \\
   #    - \${THUMBS_LOCATION}:/usr/src/app/upload/thumbs ${added_by_wizard} \\
@@ -141,6 +169,16 @@ hardcode_local_assets() {
 #endregion
 
 #region Shared Functions
+generate_random_password() {
+  local length="$1"
+  local rand_pass=$(echo "$RANDOM$(date)$RANDOM" | sha256sum | base64 | head -c"$length")
+  if [ -z "$rand_pass" ]; then
+    echo "${RANDOM}${RANDOM}"
+  else
+    echo "${rand_pass}"
+  fi
+}
+
 add_network_volumes(){  
   escaped_network_volumes=$(echo "$network_volumes" | sed ':a;N;$!ba;s/[\/&]/\\&/g; s/\n/\\n/g')
   sed -i "/^volumes:/a \\
@@ -180,7 +218,7 @@ prompt() {
     # Use the default value if the user just presses enter
     if [[ -z $user_input ]]; then
       user_input="$default_value"
-      echo "  Using default value [$default_value]" >&2
+      echo " Using default value [$default_value]" >&2
     fi
 
     # If accepted responses are provided, ensure user_input is valid
@@ -336,9 +374,10 @@ prompt_readonly() {
 }
 
 docker_compose_add_external_volume() {
-  local volume=$1
+  local external=$1
+  local internal=$2
   # echo "  Updating docker-compose.yml with the new volume..."
-  sed -i "/\/etc\/localtime:\/etc\/localtime:ro/a\      \n      - ${volume} ${added_by_wizard}" docker-compose.yml
+  sed -i "/\/etc\/localtime:\/etc\/localtime:ro/a\      \n      - ${external}:${internal} ${added_by_wizard}" docker-compose.yml
   return 0
 }
 
@@ -743,6 +782,249 @@ set_hwt() {
 }
 #endregion
 
+#region Auto Import
+#region Synology
+os_is_synology() {
+  if [ -f /etc/synoinfo.conf ]; then
+    return 0  # It's a Synology NAS
+  elif command -v synouser &> /dev/null; then
+    return 0  # synouser command is available
+  else
+    return 1  # Not a Synology NAS
+  fi
+}
+
+get_syno_users() {
+  local synology_users="$1"
+
+  # Initialize arrays
+  local syno_users_with_media=()
+  local syno_users_with_media_locations=()
+
+  # Read the output line by line
+  while IFS= read -r line; do
+    # Skip the header line
+    if [[ "$line" == *"User Name"* ]]; then
+      continue
+    fi
+    # Extract the username from the line (first field)
+    local username=${line%% *}
+    # Get the media location for the user
+    local media_location="/var/services/homes/$username/Photos"
+    
+    if media_location_has_media "$media_location"; then
+      # Add the user and their media location to the lists
+      users+=("$username")
+      media_locations+=("$media_location")
+    fi
+  done <<< "$synology_users"
+}
+#endregion
+
+import_users_and_media_post() {
+  if [ ${#users[@]} -eq 0 ]; then
+    return 1 # No users found
+  fi
+
+  
+  echo "Create an administrative user."
+  local username=$(prompt "  Enter your username" "" "default_user")
+  local password=$(prompt "  Enter your password" "" "default_password")
+  local email
+  local email_regex="^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"  # Basic email regex
+  local credential_payload
+  local response_code
+
+  while true; do
+    email=$(prompt "  Enter your email" "" "me@example.com")
+
+    # Validate the email
+    if [[ "$email" =~ $email_regex ]]; then
+      break  # Exit the loop if the email is valid
+    fi
+
+    # Print error message if email is invalid
+    echo "Invalid email format. Please try again."
+  done
+
+  echo -n "Immich is loading. This may take awhile" >&2
+  until curl -s 127.0.0.1:2283/api/server-info/ping > /dev/null 2>&1; do
+    sleep 1
+    echo -n "." >&2   # Append a dot each time we sleep
+  done
+  echo "" >&2  # Print a newline
+
+
+  credential_payload="{
+    \"email\": \"$email\",
+    \"password\": \"$password\",
+    \"name\": \"$username\"
+    }"
+
+  # Admin sign-up request
+  response_code=$(curl --location --request POST '127.0.0.1:2283/api/auth/admin-sign-up' \
+    --header 'Content-Type: application/json' \
+    --data-raw "$credential_payload" \
+    --write-out "%{http_code}" --silent --output /dev/null 2>/dev/null)
+
+  response_code=201
+
+
+  # Check if sign-up was successful (status code 200 or 201)
+  if [[ "$response_code" -eq 200 || "$response_code" -eq 201 ]]; then
+
+    # Login request to get access token
+    accessToken=$(curl --location --request POST \
+      -d "$credential_payload" \
+      -H "Content-Type: application/json" \
+      -X POST 127.0.0.1:2283/api/auth/login \
+      --silent 2>/dev/null | jq -r '.accessToken')
+
+    echo "Access Token: $accessToken" >&2
+
+    # Check if login was successful and accessToken is not empty
+    if [[ -z "$accessToken" ]]; then
+      return 1  # login failed
+    fi
+  else
+    return 1  # Sign-up failed
+  fi
+  
+
+ 
+  echo "  Note this list of users and passwords:"
+    printf "%20s : %s\n" "login" "password" >&2
+  # Print the results
+  for i in "${!users[@]}"; do
+    import_external_library "${users[i]}" "${media_locations[i]}" "$username" "$accessToken"
+  done
+
+}
+
+import_users_and_media_pre(){
+  local synology_users
+  local output
+  local local_mount_path
+  local import_path
+  if [[ $(prompt "Would you like to link immich to existing users and media?" "y n" "y") != "y" ]]; then
+    return 1;
+  fi
+
+  if os_is_synology; then
+    # Check if any users are found
+    # Get list of users
+    synology_users=$(synouser --enum)
+    if [ -z "$synology_users" ]; then
+      return 1  # No synology users found
+    fi
+
+    get_syno_users "$synology_users"
+  else
+    echo "  Unsupported OS. Your OS is not supported for auto-import." >&2
+    return 1
+  fi
+
+  
+  for i in "${!users[@]}"; do
+    import_path="${media_locations[i]}"
+    local_mount_path="/mnt/usrLib/${import_path}"
+    # Remove double slashes from the path
+    local_mount_path="${local_mount_path//\/\//\/}"
+    if ! docker_compose_add_external_volume "$import_path" "$local_mount_path"; then
+      echo "Failed to add external volume: $import_path:$local_mount_path" >&2
+      return 1
+    else
+      media_locations[$i]=$local_mount_path
+    fi
+  done
+}
+
+import_external_library(){
+  local user="$1"
+  local local_mount_path="$2"  # Pass the import path as a parameter
+  local admin_user="$3"
+  local accessToken="$4"
+  local mapped_path=""
+  local user_id
+  local library_id
+  local url="http://127.0.0.1:2283/api/admin/users"
+  local password="$((RANDOM % 10))$((RANDOM % 10))$((RANDOM % 10))$((RANDOM % 10))"
+  local library_res
+  local user_res
+  local email="$user@imm.ich"
+
+  if [[ "$user" != "$admin_user" ]]; then
+    # Create a user
+    user_res=$(curl -s --location --request POST 'http://127.0.0.1:2283/api/admin/users' \
+      --header 'Content-Type: application/json' \
+      --header "Authorization: Bearer $accessToken" \
+      --data-raw "{
+      \"email\": \"$email\",
+      \"password\": \"$password\",
+      \"shouldChangePassword\": true,
+      \"name\": \"$user\",
+      \"quotaSizeInBytes\": null,
+      \"notify\": false
+    }")
+    printf "%20s : %s\n" "$email" "$password" >&2
+  fi
+
+  # Get User ID
+  user_id=$(curl -s --location --request GET "$url" \
+    --header "Authorization: Bearer $accessToken" \
+    | jq -r --arg name "$user" '.[] | select(.name == $name) | .id')
+
+  # Check if user_id is found
+  if [ -z "$user_id" ]; then
+    echo "User not found: $user" >&2
+    return 1
+  fi
+
+  # Create a library for the user and extract the 'id'
+  library_id=$(curl -s --location --request POST "http://127.0.0.1:2283/api/libraries" \
+    --header 'Content-Type: application/json' \
+    --header "Authorization: Bearer $accessToken" \
+    --data-raw "{
+    \"ownerId\": \"$user_id\", \
+    \"importPaths\": [\"$local_mount_path\"],
+    \"name\": \"Existing Media\"
+  }")  
+  
+  # Extract the id from the response
+  library_id=$(echo "$library_id" | jq -r '.id')
+
+  # Check if library creation was successful
+  if [ -z "$library_id" ]; then
+    echo "Failed to create library for user: $user" >&2
+    return 1
+  fi
+
+  # Scan the library for files
+  url="http://127.0.0.1:2283/api/libraries/$library_id/scan"
+  library_res=$(curl -s --location --request POST "$url" \
+    --header 'Content-Type: application/json' \
+    --header "Authorization: Bearer $accessToken")
+  return 0
+
+}
+
+
+media_location_has_media() {
+  local user_home="$1"  # Adjust the path as needed
+
+  if [ -d "$user_home" ]; then
+    # Check if the directory is empty
+    if [ -z "$(ls -A "$user_home")" ]; then
+      return 1  # False (no media found)
+    else
+      return 0  # True (media found)
+    fi
+  else
+    return 1  # False (directory does not exist)
+  fi
+}
+#endregion
+
 # MAIN
 main() {
   echo "Starting Immich installation..."
@@ -758,15 +1040,17 @@ main() {
   create_immich_directory
   download_docker_compose_file
   download_dot_env_file
-  generate_random_password
+  generate_random_db_password
   set_hwa
   set_hwt
+  import_users_and_media_pre
   prompt_for_upload_location
   prompt_for_external_library
   show_mount_paths
   prompt_for_backups
   add_network_volumes
   prompt_start_docker_compose
+  import_users_and_media_post
 }
 
 main "$@"

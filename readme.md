@@ -1,5 +1,4 @@
 # Immich Installation Script
-
 This repository contains a script to install and configure Immich, a media server application. The script automates the setup process, including downloading necessary files, configuring environment variables, and starting the Docker containers.
 
 ## Prerequisites
@@ -8,15 +7,15 @@ This repository contains a script to install and configure Immich, a media serve
 
 ## Installation
 
-1. Navigate to desired Immich installation directory:
-    ```
-    cd desired/path/to/immich
-    ```
+1. Navigate to the desired Immich installation directory:
+  ```sh
+  cd desired/path/to/immich
+  ```
 
 2. Download and run the installation script:
-    ```
-    curl -O https://raw.githubusercontent.com/1-tempest/immich-install-wizard/main/install.sh && sudo ./install.sh
-    ```
+  ```sh
+  curl -O https://raw.githubusercontent.com/1-tempest/immich-install-wizard/main/install.sh && sudo ./install.sh
+  ```
 
 ## Script Overview
 
@@ -28,9 +27,10 @@ The script performs the following steps:
 4. **Generate Random Password**: Generates a random password for the application.
 5. **Prompt for Upload Location**: Asks the user to specify the upload location, which can be a local directory or a network mount.
 6. **Prompt for External Library**: Prompts the user to add an external library.
-7. **Show Mount Paths**: Displays the configured mount paths.
-8. **Prompt for Backups**: Asks the user to configure backup settings.
-9. **Start Docker Compose**: Starts the Docker containers using the configured settings.
+7. **Imports Existing Media**: Creates default users and imports media (synology only)
+8. **Show Mount Paths**: Displays the configured mount paths.
+9. **Prompt for Backups**: Asks the user to configure backup settings.
+10. **Start Docker Compose**: Starts the Docker containers using the configured settings.
 
 ## Usage
 
